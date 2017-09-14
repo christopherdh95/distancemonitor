@@ -1,0 +1,212 @@
+package br.edu.fateczonasul.openhands.service.notification;
+
+import android.app.Service;
+import android.content.Intent;
+import android.os.IBinder;
+import android.os.RemoteCallbackList;
+import android.os.RemoteException;
+import android.util.Log;
+import br.edu.fateczonasul.openhands.model.BusLine;
+import br.edu.fateczonasul.openhands.service.spi.DistanceMonitorApi;
+import br.edu.fateczonasul.openhands.service.spi.DistanceMonitorListener;
+import br.edu.fateczonasul.openhands.service.spi.DistanceMonitorResult;
+
+/**
+ * Respnsável por monitorar a distancia do Usuário em relação ao onibus mais
+ * proximo para embarque
+ * 
+ * @author Cleidiano Oliveira de Souza
+ * 
+ */
+public class DistanceMonitorServiceImpl
+	extends
+		Service
+	implements
+		DistanceMonitorService<BusLine>
+{
+	private final RemoteCallbackList<DistanceMonitorListener> listeners = new RemoteCallbackList<DistanceMonitorListener>();
+
+	private DistanceMonitorResult.Stub latestDistanceMonitorResult;
+
+	private final DistanceMonitorApi.Stub apiEndPoint = new DistanceMonitorApi.Stub() {
+		@Override
+		public void stopService()
+			throws RemoteException {
+			DistanceMonitorServiceImpl.this.stopRequest = true;
+			DistanceMonitorServiceImpl.this.stopSelf();
+			Log.e( "Parando serviço", DistanceCalculatorServiceImpl.class.getName() );
+		}
+
+		@Override
+		public void removeDistanceMonitorListener(
+			final DistanceMonitorListener listener )
+			throws RemoteException {
+			synchronized ( listener ) {
+				listeners.unregister( listener );
+				Log.e( "Removendo Listener", listener.toString() );
+
+			}
+		}
+
+		@Override
+		public void addDistanceMonitorListener(
+			final DistanceMonitorListener listener )
+			throws RemoteException {
+			synchronized ( listener ) {
+				listeners.register( listener );
+				Log.e( "Adicionando Listener", listener.toString() );
+
+			}
+
+		}
+
+		@Override
+		public DistanceMonitorResult getLatestDistanceMonitorResult()
+			throws RemoteException {
+			synchronized ( latestResult ) {
+				return latestDistanceMonitorResult;
+			}
+		}
+
+		@Override
+		public void setDistanceNotificationBuilder(
+			final DistanceNotificationBuilder builder )
+			throws RemoteException {
+			DistanceMonitorServiceImpl.this
+				.setDistanceNotificationBuilder( builder );
+		}
+
+		@Override
+		public void setDistanceNotificator(
+			final DistanceNotificator notificator )
+			throws RemoteException {
+			distanceNotificator = notificator;
+		}
+	};
+
+	private DistanceNotificationBuilder notificationBuilder;
+
+	private boolean stopRequest = false;
+
+	private DistanceNotificator distanceNotificator;
+
+	private String tag = DistanceMonitorServiceImpl.class.getSimpleName();
+
+	private Object latestResult = new Object();
+
+	@Override
+	public void onCreate() {
+		super.onCreate();
+		Log.d( DistanceMonitorServiceImpl.class.getName(),
+			"Service has starded" );
+		onHandleIntent();
+	}
+
+	@Override
+	public IBinder onBind(
+		final Intent intent ) {
+		if ( intent.getAction().equals(
+			DistanceMonitorServiceImpl.class.getName() ) ) {
+			return apiEndPoint;
+		}
+		return null;
+	}
+
+	@Override
+	public void setDistanceNotificationBuilder(
+		final DistanceNotificationBuilder builder ) {
+		this.notificationBuilder = builder;
+	}
+
+	/**
+	 * Metodo que efetua a busca de distancia
+	 */
+	private void onHandleIntent() {
+		Thread service = new Thread( new Runnable() {
+			@Override
+			public void run() {
+				while ( !stopRequest ) {
+					if ( notificationBuilder != null ) {
+						try {
+							DistanceNotification notification = notificationBuilder
+								.build();
+							publishResults( notification );
+
+							if ( distanceNotificator != null ) {
+								distanceNotificator.show( notification );
+							}
+
+							Log.d( tag, "Service running "
+								+ DistanceMonitorServiceImpl.this.toString() );
+							Thread.sleep( getTimeSleep() );
+						} catch ( InterruptedException e ) {
+							Log.e( "InterruptionException",
+								"Thread Interrompida" );
+						} catch ( RemoteException e ) {
+							Log.e( "RemoteException", "" );
+						}
+					}
+				}
+				stopSelf();
+			}
+		} );
+
+		service.start();
+	}
+
+	@Override
+	public void onDestroy() {
+		super.onDestroy();
+		Log.e( "SErvice ", "O serviço foi destruido" );
+	}
+
+	private long getTimeSleep() {
+		// TODO implementar aqui algoritmo para determinar o tempo para fazer
+		// novas verificações de distancia
+		return (10 * 1000);
+	}
+
+	/**
+	 * Notifica todos os Listeners registrados a este serviço
+	 * 
+	 * @param notification
+	 * @throws RemoteException
+	 */
+	private void publishResults(
+		final DistanceNotification notification ) {
+		/**
+		 * Sincronizado para não correr o risco de ao mesmo tempo que o client
+		 * IPC estiver chamando o metodo getLatestDistanceMonitorResult() no
+		 * IBinder, coencidir com o momento que esta Thread esta alterando valor
+		 * do atributo latestDistanceMonitorResult, o que poderia resultar em
+		 * alguns comportamentos inesperados.
+		 */
+		synchronized ( latestResult ) {
+			latestDistanceMonitorResult = new DistanceMonitorResult.Stub() {
+				@Override
+				public DistanceNotification result()
+					throws RemoteException {
+					return notification;
+				}
+			};
+			synchronized ( listeners ) {
+				/**
+				 * Notifica todos o listeners que a distancia mudou
+				 */
+				int i = listeners.beginBroadcast();
+				while ( i > 0 ) {
+					i--;
+					try {
+						Log.d( "Listner", listeners.toString() );
+						listeners.getBroadcastItem( i ).onChangeDistance(
+							latestDistanceMonitorResult );
+					} catch ( Exception e ) {
+					}
+				}
+				listeners.finishBroadcast();
+			}
+
+		}
+	}
+
+}
